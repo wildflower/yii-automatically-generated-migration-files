@@ -2,7 +2,7 @@
 #check if environment variable is set
 if [ -z "$PROJ_HOME" ]
 then
-echo "please set your $PROJ_HOME profile path"
+echo "please set your $PROJ_HOME profile path. README: https://code.google.com/p/yii-automatically-generated-migration-files/source/browse/README.txt“
 else
 cd "$PROJ_HOME/Portal/protected/"
 echo "\n############### ++ updating local db... ###############"

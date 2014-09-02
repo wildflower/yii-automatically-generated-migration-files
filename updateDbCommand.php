@@ -12,10 +12,11 @@
 *
 *   # please note:
 *    - indexes are not automatically exported;
-*    - new/dropped foreign keys generate/remove linked indexes automatically in the migration file
+*    - new and dropped foreign keys generate or remove linked indexes automatically in the migration file if $GENERATE_FK_IDX is set to true
 *    - columns renamed are considered drop columns and add addd new columns;
 *    - column unsigned and comments are not automatically exported;
 *    - the foreign key name exported is not a match with the one from the db, but based on the namming convention
+*    - if the column is a primary key, it'll be created with the unsigned flag ticked
 *
 *   # run instructions
 *   - in terminal, in your yii protected folder path, run the command:$ ./yiic updatedb
@@ -26,7 +27,9 @@
 *   - for each bd update, a migration file will be added to the $migrationsDir
 *
 *   # final notes
-*   - please feel free to send me improvements or comments to this code
+*   - please feel free to send me improvements or comments to this code as I know its not perfect :)
+*   - hosted at https://code.google.com/p/yii-automatically-generated-migration-files/
+*   - this project was inspired by this code from bmarston - https://gist.github.com/bmarston/5541632
 ************************************************************************************************
 */
 
@@ -38,7 +41,8 @@ class updateDbCommand extends CConsoleCommand
     public $initialMigrationFileSuffix = 'initial'; //initial migration with full db
     public $tab = '   '; //used for generated migration file code identation
     public $GENERATED_FILE_PREFIX = "auto_generated"; //prefix for auto-generated migration files
-    
+    public $GENERATE_FK_IDX = false; //flag to control if the indexes should be automatically generated for each fk
+
     /*
     # don't change below this line!
     */
@@ -56,31 +60,31 @@ class updateDbCommand extends CConsoleCommand
     public $DROPPED = "dropped";    
     public $EXISTING = "existing";
     public $UPDATED = "updated";
-    
+
     public function run($args) {        
         //$schema = $args[0];
         //$tables = Yii::app()->db->schema->getTables($schema);
         preg_match('/dbname=([0-9,a-z,A-Z$_]+);?/',Yii::app()->db->connectionString,$matches);        
         $this->database = $matches[1];
         $tables = Yii::app()->db->schema->getTables($this->database);                        
-        
+
         $databaseArr = array();
         $tablesArr = array();
         $indexesArr = array();
         $this->log("### Timestamp ".date("d/m/y H:i:s")." ###\n\n");
-        
+
         $this->loadCurrentDbFile();
-        
+
         /*--save current bd structure to object $this->currentBd*/
-        
+
         foreach ($tables as $table) {            
             $tableArr = array("name"=>$table->name,"status"=>"");            
             $storedTable = null;
-            
+
             /*++ check if it is a new table and generate script if so*/
             $tableArr = $this->processTable($tableArr,$storedTable);
             /*-- check if it is a new table and generate script if so*/
-            
+
             /*++get cols & keys*/
             $tableArr["cols"] = array();
             foreach ($table->columns as $col) {                
@@ -88,9 +92,9 @@ class updateDbCommand extends CConsoleCommand
                 /*++ check if it is a new table and generate script if so*/
                 $colArr = $this->processColumn($colArr,$storedTable,$tableArr);
                 /*++ check if it is a new column and generate script if so*/
-                
+
             }/*--get cols & keys*/
-            
+
             /*++get foreign keys*/
             $tableArr["foreignKeys"] = array();
             $tableArr["indexes"] = array();
@@ -99,11 +103,11 @@ class updateDbCommand extends CConsoleCommand
                 $fkArr = $this->saveFk($tableArr,$colArr,$fk,$tableArr);
                 //this only generates the fk indexes as id doesn't read from the table
                 $idxArr = $this->saveIndex($tableArr,$colArr,$tableArr);
-                
+
                 /*++ check if it is a new foreign key and generate script if so*/
                 $this->processFk($fkArr,$storedTable,$tableArr);
                 /*-- check if it is a new foreign key and generate script if so*/
-                
+
                 /*++ check if it is a new index and generate script if so*/
                 //this only generates the fk indexes as id doesn't read from the table
                 $this->processIndex($idxArr,$storedTable,$tableArr);
@@ -111,13 +115,13 @@ class updateDbCommand extends CConsoleCommand
             }            
             array_push($tablesArr,$tableArr);
         }
-                
+
         $databaseArr["tables"]=$tablesArr;        
         $this->saveToXMLFile($databaseArr); //save updated db in xml file                      
-        
+
         //check for deleted items from db to generate migration for dropped items
         $this->processDeletedBdItems($databaseArr);
-        
+
         //if there are changed items in the db, generate migration file and add drop commands
         if(count($this->tableStack) || count($this->colStack) 
            || count($this->fkStack)|| count($this->indexStack)){                        
@@ -125,48 +129,31 @@ class updateDbCommand extends CConsoleCommand
             $this->generateMigrationFile();
         }                
     }
-    
+
     /*compare saved bd config file against newly read db to look for deleted items*/
     public function processDeletedBdItems($databaseArr){        
         if(isset($this->currentBd)){
             //print_r($this->currentBd->tables->children());            
             foreach($this->currentBd->tables->children() as $storedTable){
                 $deletedTable = true;
-                
+
                 foreach($databaseArr["tables"] as $dbTable){                    
                     if($storedTable->name==$dbTable["name"]) {
                         $deletedTable = false;                        
                         break;
                     }                    
                 }
-                if($deletedTable) { //drop all items from table
+                if($deletedTable) {
                     $table = array("name"=>$storedTable->name,"status"=>$this->DROPPED);              
-                    $this->addTable($table);                    
-                    foreach($storedTable->cols->children() as $col){                        
-                        $colArr = $this->xmlObj2array($col);
-                        $colArr["status"] = $this->DROPPED;
-                        $this->addColumn($colArr);                        
-                    }
-                    foreach($storedTable->foreignKeys->children() as $fk){
-                        $fkArr = $this->xmlObj2array($fk);
-                        $fkArr["status"] = $this->DROPPED;
-                        $this->addFk($fkArr); 
-                    }
-                    foreach($storedTable->indexes->children() as $idx){
-                        //$idxArr = $this->xmlObj2array($idx);
-                        //$idxArr["status"] = $this->DROPPED;
-                        //$this->addIndex($idxArr);
-                    }
+                    $this->addTable($table); //add table to stack for post processing
                 }
-                /*if table hasn't been deleted, look for dropped table elements: indexes, fks, cols*/
+                /*look for dropped indexes, fks, cols*/
                 $this->processDeletedCols($storedTable,$dbTable);
-                $this->processDeletedFks($storedTable,$dbTable);
-                //$this->processDeletedIndexes($storedTable,$dbTable);
-                
+                $this->processDeletedFks($storedTable,$dbTable);                
             }   
         }
     }
-    
+
     /*add dropped fk to stack for post processing*/
     public function processDeletedFks($storedTable,$dbTable){
         //if cols dropped
@@ -183,12 +170,17 @@ class updateDbCommand extends CConsoleCommand
             }
             if($storedFks!=$dbFks){ 
                 $fkArr = $this->xmlObj2array($fk);
+                $colArr = array("name"=>$fkArr["column"]);                
                 $fkArr["status"] = $this->DROPPED;                        
-                $this->addFk($fkArr);                        
+                $this->addFk($fkArr); 
+                /*delete index automatically generated by fk*/
+                $idxArr = $this->getIndex($this->xmlObj2array($storedTable),$colArr);
+                $idxArr["status"] = $this->DROPPED;                        
+                $this->addIndex($idxArr); 
             }
         }   
     }
-    
+
     /*add dropped cols to stack for post processing*/
     public function processDeletedCols($storedTable,$dbTable){
         //if cols dropped
@@ -212,7 +204,7 @@ class updateDbCommand extends CConsoleCommand
             }
         }   
     }
-    
+
     /*generate code for safeUp method for Indexes*/
     public function generateUpIndexes($status){
         foreach($this->indexStack as $idx){
@@ -240,63 +232,63 @@ class updateDbCommand extends CConsoleCommand
             if($status==$table["status"]) $this->upTable($table);
         }
     }
-    
+
     /*generate code for safeDown method for Indexes*/
     public function generateDownIndexes($status){
         foreach($this->indexStack as $idx){
             if($status==$idx["status"]) $this->downIndex($idx);
         }
     }
-    
+
     /*generate code for safeDown method for fks*/
     public function generateDownFks($status){
         foreach($this->fkStack as $fk){
             if($status==$fk["status"]) $this->downFk($fk);
         }
     }
-    
+
     /*generate code for safeDown method for cols*/
     public function generateDownCols($status){
         foreach($this->colStack as $col){
             if($status==$col["status"]) $this->downColumn($col);
         }
     }
-    
+
     /*generate code for safeDown method for tables*/
     public function generateDownTables($status){
         foreach($this->tableStack as $table){
             if($status==$table["status"]) $this->downTable($table);
         }
     }
-    
+
     /*generate migration code & file*/
     public function generateMigrationFile(){
         /*++don't change this order so that the db changes are applied without errors*/
         //generate safeUp/Down code for changed columns
         $this->generateUpCols($this->UPDATED); //alter cols
         $this->generateDownCols($this->UPDATED); //restore cols
-        
+
         //++generate safeUp code for new items
         $this->generateUpTables($this->NEW); //create table
         $this->generateUpCols($this->NEW); //create cols
         $this->generateUpFks($this->NEW); //create fks
         $this->generateUpIndexes($this->NEW); //create idxs
         //--generate safeUp code for new items
-        
+
         //++generate safeDown code for dropped items
         $this->generateDownTables($this->DROPPED); //create table
         $this->generateDownCols($this->DROPPED); //create cols
         $this->generateDownFks($this->DROPPED); //create fk
         $this->generateDownIndexes($this->DROPPED); //createIdxs 
         //--generate safeDown code for dropped items
-        
+
         //++generate safeUp code for dropped items
         $this->generateUpIndexes($this->DROPPED); //drop Idxs
         $this->generateUpFks($this->DROPPED); //drop Fks
         $this->generateUpCols($this->DROPPED); //drop cols
         $this->generateUpTables($this->DROPPED); //drop tables        
         //--generate safeUp for dropped items
-        
+
         //++generate safeDown code for new items
         $this->generateDownIndexes($this->NEW); //drop idxs
         $this->generateDownFks($this->NEW); //drop fks
@@ -304,7 +296,7 @@ class updateDbCommand extends CConsoleCommand
         $this->generateDownTables($this->NEW); //drop tables
         //--generate code for new items
         /*--don't change this order so that the db changes are applied without errors*/
-        
+
         $this->createMigrationFile();
         $space = $this->tab;
         $migrationFile = str_replace(".php","",$this->migrationFile);
@@ -319,11 +311,11 @@ class updateDbCommand extends CConsoleCommand
         $string .= "}\n?>";	
         //print_r($string);
         file_put_contents(Yii::app()->basePath.$this->migrationsDir.$this->migrationFile,$string);
-        
+
         //mark this migration as performed in local db       
         $this->markMigration($migrationFile);
     }
-    
+
     /*save fk to read db array*/
     public function saveFk($table,$col,$fkArr,&$tableArr){
         $fk = array();
@@ -340,7 +332,7 @@ class updateDbCommand extends CConsoleCommand
         return $fk;
     }
     /*-- save to dbDefinition file*/
-    
+
     /*save column to read db array*/
     public function saveColumn($col,&$tableArr,$table){
         $tableCol = array();
@@ -361,7 +353,7 @@ class updateDbCommand extends CConsoleCommand
         //$tableCol["status"] = $this->NEW; //not saved to db structure but used for internal control
         return $tableCol;
     }
-    
+
     /*save index to read db array*/
     public function saveIndex($table,$col,&$tableArr){                 
         $idx = $this->getIndex($table,$col);
@@ -369,7 +361,7 @@ class updateDbCommand extends CConsoleCommand
         //$idx["status"] = $this->NEW; //not saved to db structure but used for internal control
         return $idx;
     }
-    
+
     /*generate an index baxed in the table and column names, linked with the fk*/
     public function getIndex($table,$col){
         $idx = array();
@@ -379,7 +371,7 @@ class updateDbCommand extends CConsoleCommand
         $idx["col"] = $col["name"];  
         return $idx;
     }
-   
+
     /*load existing bd definition from xml file if exists for comparison against the local db*/
     public function loadCurrentDbFile(){
         /*++save current bd structure to object $this->currentBd*/
@@ -393,7 +385,7 @@ class updateDbCommand extends CConsoleCommand
         }
         $this->migrationFile = $migrationFileName;
     }
-    
+
     /*create file via yii migration. It's contents will be overriden by the generateMigrationFile() function*/
     public function createMigrationFile(){
         $existingFiles = scandir(Yii::app()->basePath.$this->migrationsDir);
@@ -402,7 +394,7 @@ class updateDbCommand extends CConsoleCommand
         $migrationFile = array_diff($newFiles,$existingFiles);        
         $this->migrationFile = array_pop($migrationFile);
     }
-    
+
     /*convert read db array to an xml string*/
     public function saveToXMLFile($databaseArr){        
         $xml_bd = new SimpleXMLElement("<?xml version=\"1.0\"?><$this->database></$this->database>");                
@@ -414,21 +406,21 @@ class updateDbCommand extends CConsoleCommand
         $dom->loadXML($xml_bd->asXML());
         $dom->save(Yii::app()->basePath.$this->bdFile);
     }
-    
+
     /*++add items to stack for post processing and generation of migration file*/        
     public function addTable($table){
         array_push($this->tableStack,$table); //for adding latter dropping tables
     }
-    
+
     public function addColumn($col){  
         array_push($this->colStack,$col);        
     }
-    
+
     public function addFk($fk){
         array_push($this->fkStack,$fk);
     }    
     /*--add items to stack for post processing and generation of migration file*/    
-    
+
     /*++generation of up and down methods for migration file*/
     public function upTable($table){        
         $space  = $this->tab.$this->tab.$this->tab;
@@ -440,7 +432,7 @@ class updateDbCommand extends CConsoleCommand
             $this->dropDbTable($table,$this->upRows);
         }        
     }
-    
+
     public function downTable($table){
         if($table["status"]==$this->NEW){
             $this->dropDbTable($table,$this->downRows);            
@@ -448,13 +440,13 @@ class updateDbCommand extends CConsoleCommand
             $this->addDbTable($table,$this->downRows);            
         }
     }
-    
+
     public function upColumn($col){    
-        
+
         if("true"==$col["isPrimaryKey"]) 
             $type = $col["dbType"]. " primary KEY AUTO_INCREMENT";
         else $type = $col["type"];
-        
+
         if($col["status"]==$this->NEW){            
             $this->log("* Table '".$col["table"]."' -> New column: '"
                        .$col["name"]."' | type: '".$type."'");
@@ -473,7 +465,7 @@ class updateDbCommand extends CConsoleCommand
             $this->updateDbCol($col,$this->upRows);
         }            
     }
-    
+
     public function downColumn($col){        
         if($col["status"]==$this->NEW){            
             $this->dropDbCol($col,$this->downRows);
@@ -487,7 +479,7 @@ class updateDbCommand extends CConsoleCommand
             $this->updateDbCol($col["previousState"],$this->downRows);
         }            
     }
-    
+
     public function upFk($fk){
         if($fk["status"]==$this->NEW){  
             $this->log("* Table '".$fk["table"]."' -> New Fk: '".$fk["name"]."'");
@@ -498,7 +490,7 @@ class updateDbCommand extends CConsoleCommand
             $this->dropDbFk($fk,$this->upRows);
         }
     }
-    
+
     public function downfk($fk){
         if($fk["status"]==$this->NEW){            
             $this->dropDbFk($fk,$this->downRows);
@@ -519,7 +511,7 @@ class updateDbCommand extends CConsoleCommand
         }
 
     }
-    
+
     public function downIndex($idx){
         if($idx["status"]==$this->NEW){            
             $this->dropDbIndex($idx,$this->downRows);
@@ -528,9 +520,9 @@ class updateDbCommand extends CConsoleCommand
             $this->addDbIndex($idx,$this->downRows);
         }
     }       
-    
+
     /*--generation of up and down methods for migration file*/
-    
+
     /*++ migration snippets for db updates*/
     public function updateDbCol($col,&$migrationCode){               
         $space  = $this->tab.$this->tab.$this->tab;
@@ -540,20 +532,20 @@ class updateDbCommand extends CConsoleCommand
         $migrationCode .= "\n".$space.'$this->alterColumn(\'' . $col["table"] . '\',\''
             .$col["name"].'\',\''.$type.'\');';
     }
-    
+
     public function addDbCol($col,&$migrationCode){       
         $space  = $this->tab.$this->tab.$this->tab;
         $type = "";
-        
+
         if("true"==$col["isPrimaryKey"]) 
             $type = $col["dbType"]. " primary KEY AUTO_INCREMENT";
         else $type = isset($col["defaultValue"])? ($col["dbType"]." DEFAULT ".$col["defaultValue"]) : $col["type"];
-        
+
         //generate add column
         $migrationCode .= "\n".$space.'$this->addColumn(\'' . $col["table"] . '\',\''
             .$col["name"].'\',\''.$type.'\');';
     }
-    
+
     public function dropDbCol($col,&$migrationCode){
         foreach($this->tableStack as $table){
             //don't drop columns if table will also be dropped, to avoid db errors
@@ -567,7 +559,7 @@ class updateDbCommand extends CConsoleCommand
         $migrationCode .= "\n".$space.'$this->dropColumn(\'' . $col["table"] . '\',\''
             .$col["name"].'\');';
     }
-    
+
     public function addDbTable($table,&$migrationCode){
         $space  = $this->tab.$this->tab.$this->tab;
         $pk = "";        
@@ -586,7 +578,7 @@ class updateDbCommand extends CConsoleCommand
         $space  = $this->tab.$this->tab.$this->tab;
         $migrationCode .= "\n".$space.'$this->dropTable(\'' . $table["name"] . '\');'; 
     } 
-    
+
     public function addDbFk($fk,&$migrationCode){
         $space  = $this->tab.$this->tab.$this->tab;        
         //generate code for add foreign key
@@ -594,13 +586,13 @@ class updateDbCommand extends CConsoleCommand
             .$fk["table"].'\','."\n".$space.$space.'\''.$fk["col"].'\',\''.$fk["fkTable"].'\',\''
             .$fk["fkcol"].'\',\''.$fk["onDelete"].'\',\''.$fk["onUpdate"].'\');';
     }
-    
+
     public function dropDbFk($fk,&$migrationCode){
         $space  = $this->tab.$this->tab.$this->tab;
         $migrationCode .= "\n".$space.'$this->dropForeignKey(\'' . $fk["name"] . '\',\''
             .$fk["table"].'\');'; 
     }
-    
+
     public function addDbIndex($idx,&$migrationCode){
         $space  = $this->tab.$this->tab.$this->tab;        
         //generate code for add index
@@ -614,14 +606,14 @@ class updateDbCommand extends CConsoleCommand
         $migrationCode .= "\n".$space.'$this->dropIndex (\'' . $idx["name"] . '\',\''
             .$idx["table"].'\');';   
     }
-    
+
     /*-- migration snippets for db updates*/                                                            
-                                                         
+
     public function addIndex($idx){
-        //added to stack for the drop fk command at the end of the run
-        array_push($this->indexStack,$idx);
+        //added to stack for post processing
+        if($this->GENERATE_FK_IDX) array_push($this->indexStack,$idx);
     }
-    
+
     /*check if new index or existing and add to stack for post processing*/
     public function processIndex($idx,$storedTable,$table){
         $newIdx = true;
@@ -648,7 +640,7 @@ class updateDbCommand extends CConsoleCommand
         } else $this->addIndex($idx); 
         return $newIdx;
     }
-    
+
     /*check if new fk or existing and add to stack for post processing*/
     public function processFk($fk,$storedTable,$table){
         $newfk = true;
@@ -673,7 +665,7 @@ class updateDbCommand extends CConsoleCommand
         } else $this->addFk($fk); 
         return $newfk;
     }
-    
+
     /*check if new table or existing and add to stack for post processing*/
     public function processTable($table,&$storedTable){
         $newtable = true;                
@@ -693,7 +685,7 @@ class updateDbCommand extends CConsoleCommand
         } else $this->addTable($table);
         return $table;
     }
-    
+
     /*check if new column, updated or existing and add to stack for post processing*/
     public function processColumn($col,$storedTable,$table){
         $newcol = true;
@@ -732,7 +724,7 @@ class updateDbCommand extends CConsoleCommand
                     }
                     else $col["status"] = $this->EXISTING;
                 }
-                
+
             }
             /*-- check if it is a new or modified column*/
         } else $this->addColumn($col); 
@@ -743,7 +735,7 @@ class updateDbCommand extends CConsoleCommand
     public function log($text){
         $this->changelog .= $text."\n";
     }        
-    
+
     /*get info from column (default value, allow null, is primary) and return in db format*/
     public function getColType($col) {
         if ($col->isPrimaryKey && $col->autoIncrement) {
@@ -760,7 +752,7 @@ class updateDbCommand extends CConsoleCommand
         }
         return addslashes($result);
     }
-    
+
     // function definition to convert array to xml
     function array_to_xml($array, &$xml_bd) {        
         foreach($array as $key => $value) {
@@ -779,7 +771,7 @@ class updateDbCommand extends CConsoleCommand
             }
         }
     }
-    
+
     /*function to instanciate the yii migrate command*/
     private function createMigration($name) {
         $commandPath = Yii::app()->getBasePath() . DIRECTORY_SEPARATOR . 'commands';        
@@ -793,7 +785,7 @@ class updateDbCommand extends CConsoleCommand
         $runner->run($args);
         echo htmlentities(ob_get_clean(), null, Yii::app()->charset);
     }
-    
+
     /*function to instantiate the yii migrate command and mark a file as migrated*/
     private function markMigration($name) {
         $commandPath = Yii::app()->getBasePath() . DIRECTORY_SEPARATOR . 'commands';        
@@ -807,7 +799,7 @@ class updateDbCommand extends CConsoleCommand
         $runner->run($args);
         echo htmlentities(ob_get_clean(), null, Yii::app()->charset);
     }
-    
+
     //convert an object ($obj->val) to it's array representation ($arr['val'])
     function xmlObj2array($xml){
         $arr = array();
