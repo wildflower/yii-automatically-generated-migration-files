@@ -1,0 +1,17 @@
+#!/bin/sh
+#check if environment variable is set
+if [ -z "$PROJ_HOME" ]
+then
+echo "please set your $PROJ_HOME profile path"
+else
+cd "$PROJ_HOME/Portal/protected/"
+echo "\n############### ++ updating local db... ###############"
+php yiic.php migrate --interactive=0
+echo "********************************************************************"
+echo "*  please note:"
+echo "*    - indexes are not automatically exported;"
+echo "*    - column renames are considered drop column and add new column;"
+echo "*    - column unsigned and comments are not automatically exported;"
+echo "********************************************************************"
+echo "\n############### -- finished updating local db ###############\n"
+fi
